@@ -13,68 +13,108 @@
 #include "receiver.h"
 
 int out_fd;
-int doc_serial[3];
+// indicate the processing document.
+int ptr[2];
+int doc_num[3];
 float doc_time[3][NUM_DOCUMENTS];
+int times[3] = {ORDINARY_TIME, URGENT_TIME, VERY_URGENT_TIME};
+int child_pid;
+int serial_num = 1;
 
 void init(void)
 {
     int i, j;
     for (i = 0; i < 3; i++) {
-        doc_serial[i] = 0;
+        doc_num[i] = 0;
         for (j = 0; j < NUM_DOCUMENTS; j++)
             doc_time[i][j] = 0.0;
     }
+
+    // init ptr
+    ptr[0] = -1;
+    ptr[1] = -1;
+
+    // init child_pid
+    child_pid = -1;
 }
 
 int add_doc(int type)
 {
-    float time;
-    switch(type) {
-        case ORDINARY:
-            time = ORDINARY_TIME;
-            break;
-        case URGENT:
-            time = URGENT_TIME;
-            break;
-        case VERY_URGENT:
-            time = VERY_URGENT_TIME;
-            break;
-        default:
-            return -1;
-    }
-    doc_time[type][doc_serial[type]] = time;
-    doc_serial[type]++;
+    doc_time[type][doc_num[type]] = times[type];
+    doc_num[type]++;
     return type;
 }
 
-int num_doc(int type)
+void finish_doc(void)
 {
-    float time;
+    // shift the doc behind ptr 1 unit.
     int i;
-    int count = 0;
-    for (i = 0; i < NUM_DOCUMENTS; i++)
-        if (doc_time[type][i] != 0.0)
-            count++;
-    return count;
+    int max_num = doc_num[ptr[0]];
+    char buffer[BUFFER_SIZE];
+    for (i = ptr[1]; i < max_num - 1; i++)
+        doc_time[ptr[0]][i] = doc_time[ptr[0]][i + 1];
+    doc_time[ptr[0]][max_num - 1] = 0;
+
+    // write to log
+    bzero(buffer, sizeof(buffer));
+    sprintf(buffer, "finish %d %d\n", ptr[0], serial_num);
+    write(out_fd, buffer, strlen(buffer));
+
+    // signal the writer
+    if (ptr[0] == ORDINARY)
+        kill(child_pid, SIGINT);
+    else if (ptr[0] == URGENT)
+        kill(child_pid, SIGUSR1);
+    else if (ptr[0] == VERY_URGENT)
+        kill(child_pid, SIGUSR2);
+
+    // refresh the doc_num
+    doc_num[ptr[0]]--;
+
+    // reset ptr
+    ptr[0] = -1;
+    ptr[1] = -1;
 }
 
-int doc_remain_processing(void)
+// if ptr = -1:
+//      return
+// else
+//      find a doc that is undone
+//      else
+//          return ptr = -1
+void get_doc(void)
 {
-    if (num_doc(VERY_URGENT) != 0)
-        return VERY_URGENT;
-    else if (num_doc(URGENT) != 0)
-        return URGENT;
-    else if (num_doc(ORDINARY) != 0)
-        return ORDINARY;
-    else
-        return -1;
+    if (ptr[0] == -1 && ptr[1] == -1)
+        return;
+    int i, j;
+    for (i = 2; i >= 0; i--)
+        for (j = 0; j < doc_num[i]; j++)
+            // only consider docs whose priority is higher than the ptr
+            if (i > ptr[0] && doc_time[i][j] != 0) {
+                ptr[0] = i;
+                ptr[1] = j;
+                return;
+            }
+
+    // no doc available
+    ptr[0] = -1;
+    ptr[1] = -1;
 }
 
 void sig_handler(int signo)
 {
-    if (signo == SIGINT)
+    char buffer[BUFFER_SIZE];
+    if (signo == SIGINT) {
         fprintf(stderr, "received SIGINT\n");
-    else if (signo == SIGUSR1) {
+        // kill sender and write to receiver_log
+        if (child_pid > 0) {
+            kill(child_pid, SIGKILL);
+            bzero(buffer, sizeof(buffer));
+            sprintf(buffer, "terminate\n");
+            write(out_fd, buffer, strlen(buffer));
+            exit(EXIT_SUCCESS);
+        }
+    } else if (signo == SIGUSR1) {
         fprintf(stderr, "received URGENT\n");
         add_doc(URGENT);
     } else if (signo == SIGUSR2) {
@@ -102,7 +142,6 @@ int main(int argc, char *argv[])
     test_data_name[strlen(argv[1])] = '\0';
 
     // claim some necessary variables
-    int i, j;
     char buffer[BUFFER_SIZE];
     buffer[0] = 0;
 
@@ -147,6 +186,8 @@ int main(int argc, char *argv[])
         // this should never be run
         perror("execl");
         _exit(EXIT_FAILURE);
+    } else {
+        child_pid = pid;
     }
 
     // open a file named with "receiver_log" to record the action of receiver
@@ -161,7 +202,7 @@ int main(int argc, char *argv[])
     //      kill sender
     //      write "terminate" to "receiver_log"
     //      terminate itself
-    out_fd = open("receiver_log", O_WRONLY | O_APPEND | O_CREAT, 0644);
+    out_fd = open("receiver_log", O_WRONLY | O_CREAT, 0644);
     if (out_fd < 0) {
         perror("open");
         exit(EXIT_FAILURE);
@@ -175,19 +216,8 @@ int main(int argc, char *argv[])
         fprintf(stderr, "\ncan't catch SIGUSR1\n");
     if (signal(SIGUSR2, sig_handler) == SIG_ERR)
         fprintf(stderr, "\ncan't catch SIGUSR2\n");
-    // struct  timeval{
-    //   long  tv_sec;
-    //   long  tv_usec; //microsec
-    // }；
-    struct timeval tt;
-    gettimeofday(&tt, NULL);
-    printf("%d\n", tt.tv_usec);
 
     fd_set fds;
-    usleep(100000000);
-                bzero(buffer, sizeof(buffer));
-                sprintf(buffer, "terminate\n");
-                write(out_fd, buffer, strlen(buffer));
     while (1) {
         FD_ZERO(&fds);
         FD_SET(pipe_from_sender[0], &fds);
@@ -199,24 +229,51 @@ int main(int argc, char *argv[])
                 perror("read");
                 exit(EXIT_FAILURE);
             } else if (byte == 0) {
+                // write terminate and kill itself
                 bzero(buffer, sizeof(buffer));
                 sprintf(buffer, "terminate\n");
                 write(out_fd, buffer, strlen(buffer));
+                exit(EXIT_SUCCESS);
             }
             if (strcmp(buffer, "ordinary\n") == 0) {
-                fprintf(stderr, "received ORDINARY\n");
+                fprintf(stderr, "received \n");
                 add_doc(ORDINARY);
-                bzero(buffer, sizeof(buffer));
-//                sprintf(buffer, "\n");
-//                write(out_fd
             }
         }
-        // test if there is document remaining undone
-        int doc_type = doc_remain_processing();
-        // yes
-        if (doc_type != -1) {
-        }
-        // process files
-    }
+        // if is free, we distribute CPU to documents.
+        get_doc();
+        // if there is a new doc
+        if (ptr[0] != -1 && ptr[1] != -1) {
+            /* deal with the doc */
+
+            // if we just handle this doc,
+            int remain_time = doc_time[ptr[0]][ptr[1]];
+            if (remain_time == times[ptr[0]]) {
+                // write to log
+                bzero(buffer, sizeof(buffer));
+                sprintf(buffer, "receive %d %d\n", ptr[0], serial_num);
+                write(out_fd, buffer, strlen(buffer));
+            }
+
+            // struct  timeval{
+            //   long  tv_sec;
+            //   long  tv_usec; // microsec
+            // }；
+            struct timeval t1;
+            gettimeofday(&t1, NULL);
+            int time1 = t1.tv_sec * 1000000 + t1.tv_usec;
+
+            usleep(remain_time);
+
+            struct timeval t2;
+            gettimeofday(&t2, NULL);
+            int time2 = t2.tv_sec * 1000000 + t2.tv_usec;
+
+            int time_elapse = time2 - time1;
+            if (time_elapse >= remain_time) {
+                finish_doc();
+            }
+        } // if (ptr[0] != -1 && ptr[1] != -1) {
+    } // while (1)
     return EXIT_SUCCESS;
 }
