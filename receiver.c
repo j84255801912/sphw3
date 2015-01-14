@@ -109,6 +109,7 @@ void sig_handler(int signo)
         fprintf(stdout, "received SIGINT\n");
         // kill sender and write to receiver_log
         if (child_pid > 0) {
+            fprintf(stdout, "killed sender\n");
             kill(child_pid, SIGKILL);
             bzero(buffer, sizeof(buffer));
             sprintf(buffer, "terminate\n");
@@ -243,7 +244,8 @@ int main(int argc, char *argv[])
         FD_SET(pipe_from_sender[0], &fds);
 
         // if sender send us an ordinary
-        if (select(pipe_from_sender[0] + 1, &fds, 0, 0, &tt) > 0) {
+        // a file_descriptor is ready on end-of-file
+        if (select(pipe_from_sender[0] + 1, &fds, NULL, NULL, &tt) > 0) {
             bzero(buffer, sizeof(buffer));
             int byte = read(pipe_from_sender[0], buffer, sizeof(buffer));
             fprintf(stderr, "%s", buffer);
@@ -262,7 +264,6 @@ int main(int argc, char *argv[])
                 add_doc(ORDINARY);
             }
         }
-
         // if is free, we distribute CPU to documents.
         get_doc();
 
