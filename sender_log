@@ -1,4 +1,10 @@
 send 0 1
 send 1 1
 send 2 1
-timeout 2 1
+finish 2 1
+finish 1 1
+finish 0 1
+send 2 2
+send 1 2
+finish 2 2
+finish 1 2

@@ -19,13 +19,14 @@ int doc_num[3];
 float doc_time[3][NUM_DOCUMENTS];
 int times[3] = {ORDINARY_TIME, URGENT_TIME, VERY_URGENT_TIME};
 int child_pid;
-int serial_num = 1;
+int serial_num[3];
 
 void init(void)
 {
     int i, j;
     for (i = 0; i < 3; i++) {
         doc_num[i] = 0;
+        serial_num[i] = 0;
         for (j = 0; j < NUM_DOCUMENTS; j++)
             doc_time[i][j] = 0.0;
     }
@@ -42,6 +43,7 @@ int add_doc(int type)
 {
     doc_time[type][doc_num[type]] = times[type];
     doc_num[type]++;
+    serial_num[type]++;
     return type;
 }
 
@@ -57,7 +59,7 @@ void finish_doc(void)
 
     // write to log
     bzero(buffer, sizeof(buffer));
-    sprintf(buffer, "finish %d %d\n", ptr[0], serial_num);
+    sprintf(buffer, "finish %d %d\n", ptr[0], serial_num[ptr[0]]);
     write(out_fd, buffer, strlen(buffer));
 
     // signal the writer
@@ -74,6 +76,7 @@ void finish_doc(void)
     // reset ptr
     ptr[0] = -1;
     ptr[1] = -1;
+
 }
 
 // if ptr = -1:
@@ -84,8 +87,6 @@ void finish_doc(void)
 //          return ptr = -1
 void get_doc(void)
 {
-    if (ptr[0] == -1 && ptr[1] == -1)
-        return;
     int i, j;
     for (i = 2; i >= 0; i--)
         for (j = 0; j < doc_num[i]; j++)
@@ -105,7 +106,7 @@ void sig_handler(int signo)
 {
     char buffer[BUFFER_SIZE];
     if (signo == SIGINT) {
-        fprintf(stderr, "received SIGINT\n");
+        fprintf(stdout, "received SIGINT\n");
         // kill sender and write to receiver_log
         if (child_pid > 0) {
             kill(child_pid, SIGKILL);
@@ -115,13 +116,24 @@ void sig_handler(int signo)
             exit(EXIT_SUCCESS);
         }
     } else if (signo == SIGUSR1) {
-        fprintf(stderr, "received URGENT\n");
+        fprintf(stdout, "received URGENT\n");
         add_doc(URGENT);
     } else if (signo == SIGUSR2) {
-        fprintf(stderr, "received VERY URGENT\n");
+        fprintf(stdout, "received VERY URGENT\n");
         add_doc(VERY_URGENT);
     }
 //    printf("%x\n", &errno);
+}
+
+void print_time(void)
+{
+    int i, j;
+    for (i = 0; i < 3; i++) {
+        for (j = 0; j < NUM_DOCUMENTS; j++) {
+            fprintf(stderr, "%f ", doc_time[i][j]);
+        }
+        fprintf(stderr, "\n");
+    }
 }
 
 int main(int argc, char *argv[])
@@ -218,13 +230,23 @@ int main(int argc, char *argv[])
         fprintf(stderr, "\ncan't catch SIGUSR2\n");
 
     fd_set fds;
+/*
+    int flags = fcntl(out_fd, F_GETFL, 0);
+    fcntl(out_fd, F_SETFL, flags | O_NONBLOCK);
+*/
+    // make select non-blocking
+    struct timeval tt;
+    tt.tv_sec = 0;
+    tt.tv_usec = 0;
     while (1) {
         FD_ZERO(&fds);
         FD_SET(pipe_from_sender[0], &fds);
+
         // if sender send us an ordinary
-        if (select(pipe_from_sender[0] + 1, &fds, 0, 0, NULL) > 0) {
+        if (select(pipe_from_sender[0] + 1, &fds, 0, 0, &tt) > 0) {
             bzero(buffer, sizeof(buffer));
             int byte = read(pipe_from_sender[0], buffer, sizeof(buffer));
+            fprintf(stderr, "%s", buffer);
             if (byte < 0) {
                 perror("read");
                 exit(EXIT_FAILURE);
@@ -236,12 +258,14 @@ int main(int argc, char *argv[])
                 exit(EXIT_SUCCESS);
             }
             if (strcmp(buffer, "ordinary\n") == 0) {
-                fprintf(stderr, "received \n");
+                fprintf(stdout, "received ORDINARY\n");
                 add_doc(ORDINARY);
             }
         }
+
         // if is free, we distribute CPU to documents.
         get_doc();
+
         // if there is a new doc
         if (ptr[0] != -1 && ptr[1] != -1) {
             /* deal with the doc */
@@ -251,7 +275,7 @@ int main(int argc, char *argv[])
             if (remain_time == times[ptr[0]]) {
                 // write to log
                 bzero(buffer, sizeof(buffer));
-                sprintf(buffer, "receive %d %d\n", ptr[0], serial_num);
+                sprintf(buffer, "receive %d %d\n", ptr[0], serial_num[ptr[0]]);
                 write(out_fd, buffer, strlen(buffer));
             }
 
@@ -270,8 +294,12 @@ int main(int argc, char *argv[])
             int time2 = t2.tv_sec * 1000000 + t2.tv_usec;
 
             int time_elapse = time2 - time1;
+            // if the doc is finish
             if (time_elapse >= remain_time) {
+//                fprintf(stdout, "finish %d %d\n", ptr[0], ptr[1]);
                 finish_doc();
+            } else {
+                doc_time[ptr[0]][ptr[1]] -= time_elapse;
             }
         } // if (ptr[0] != -1 && ptr[1] != -1) {
     } // while (1)
